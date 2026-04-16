@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  
+  --color-bg: #f0f7fa;
+  --color-sidebar-bg: #e1f0f7;
+  --color-accent: #0076b3;
+  --color-accent-hover: #005f91;
+  --color-text-main: #1d3644;
+  --color-text-muted: #648191;
+  --color-border-theme: #c9dde9;
+  --color-success-theme: #4bb34b;
+  --color-danger-theme: #e23e3e;
+}
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Segoe UI', sans-serif;
+    
+    --color-background: #ffffff;
+    --color-foreground: #1d3644;
+    
+    --color-card: #ffffff;
+    --color-card-foreground: #1d3644;
+    
+    --color-popover: #ffffff;
+    --color-popover-foreground: #1d3644;
+    
+    --color-primary: #0076b3;
+    --color-primary-foreground: #ffffff;
+    
+    --color-secondary: #e1f0f7;
+    --color-secondary-foreground: #1d3644;
+    
+    --color-muted: #f0f7fa;
+    --color-muted-foreground: #648191;
+    
+    --color-accent: #e1f0f7;
+    --color-accent-foreground: #0076b3;
+    
+    --color-destructive: #e23e3e;
+    --color-destructive-foreground: #ffffff;
+    
+    --color-border: #c9dde9;
+    --color-input: #ffffff;
+    --color-ring: #0076b3;
+    
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.2 0.05 210);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.2 0.05 210);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.2 0.05 210);
+    --primary: oklch(0.5 0.15 230);
+    --primary-foreground: oklch(1 0 0);
+    --secondary: oklch(0.95 0.02 210);
+    --secondary-foreground: oklch(0.2 0.05 210);
+    --muted: oklch(0.98 0.01 210);
+    --muted-foreground: oklch(0.5 0.05 210);
+    --accent: oklch(0.95 0.02 210);
+    --accent-foreground: oklch(0.5 0.15 230);
+    --destructive: oklch(0.6 0.2 20);
+    --border: oklch(0.9 0.03 210);
+    --input: oklch(1 0 0);
+    --ring: oklch(0.5 0.15 230);
+    --radius: 1rem;
+}
+
+.bus-bg-illustration {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  opacity: 0.1;
+  pointer-events: none;
+  width: 900px;
+  height: auto;
+  z-index: 0;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+}
