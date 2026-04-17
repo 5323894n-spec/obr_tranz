@@ -21,6 +21,7 @@ export interface PrilRow {
   grz_raw: string;
   grz_norm: string;
   actual_work_km: number;
+  direction: string;
   start_datetime: Date | null;
 }
 
@@ -31,6 +32,7 @@ export interface TransactionRow {
   ROUTE_NUM: string;
   TRIP_NO: string;
   CR_TIME: string;
+  IN_NAME: string;
   tran_datetime: Date | null;
   vreg_norm: string;
 }
@@ -43,6 +45,7 @@ export interface ReconciliationResult {
   status: string;
   tripNo: string;
   mileage: number;
+  direction: string;
   transCount: number;
   openTimes: string;
   closeTimes: string;
@@ -181,11 +184,13 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
     const kTime = findKey(row, ['Фактическое время начала рейса', 'Время начала', 'Start Time', 'Время']);
     const kGrz = findKey(row, ['ГРЗ', 'Госномер', 'VREG_NUM', 'Vehicle', 'Гос. номер']);
     const kWork = findKey(row, ['Фактическая транспортная работа', 'Пробег', 'Mileage', 'Работа', 'км']);
+    const kDirection = findKey(row, ['Направление', 'Direction', 'Код направления', 'Прям/Обр']);
 
     const dateStr = (kDate ? row[kDate] : '').trim();
     const route = (kRoute ? row[kRoute] : '').trim();
     const startTimeStr = (kTime ? row[kTime] : '').trim();
     const grzRaw = (kGrz ? row[kGrz] : '').trim();
+    const direction = (kDirection ? row[kDirection] : '').trim();
     let actualWorkKm = parseFloat(String((kWork ? row[kWork] : '0')).replace(',', '.'));
     if (isNaN(actualWorkKm)) actualWorkKm = 0;
 
@@ -247,6 +252,7 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
         grz_raw: grzRaw,
         grz_norm: normalizeGrz(grzRaw),
         actual_work_km: actualWorkKm,
+        direction: direction,
         start_datetime: startDatetime
       });
     }
@@ -259,10 +265,12 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
     const kRoute = findKey(row, ['ROUTE_NUM', 'Маршрут', 'Route']);
     const kTrip = findKey(row, ['TRIP_NO', 'Рейс', 'Trip']);
     const kCrTime = findKey(row, ['CR_TIME', 'Время закрытия', 'Close Time']);
+    const kInName = findKey(row, ['IN_NAME', 'Остановка', 'Stop Name']);
 
     const date = (kDate ? row[kDate] : '').trim();
     const time = (kTime ? row[kTime] : '').trim();
     const vregNum = (kVreg ? row[kVreg] : '').trim();
+    const inName = (kInName ? row[kInName] : '').trim();
     
     let tranDatetime: Date | null = null;
     if (date && time) {
@@ -313,6 +321,7 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
         ROUTE_NUM: (kRoute ? row[kRoute] : '').trim(),
         TRIP_NO: (kTrip ? row[kTrip] : '').trim(),
         CR_TIME: (kCrTime ? row[kCrTime] : '').trim(),
+        IN_NAME: inName,
         tran_datetime: tranDatetime,
         vreg_norm: normalizeGrz(vregNum)
       });
@@ -384,6 +393,22 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
     const isConfirmed = selectedTripNo !== "";
     if (isConfirmed) confirmedCount++; else unconfirmedCount++;
 
+    let finalDirection = flight.direction;
+    if (confirmedTransactions.length > 0) {
+      const sampleWithDirection = confirmedTransactions.find(t => t.IN_NAME.includes('_A_') || t.IN_NAME.includes('_B_'));
+      if (sampleWithDirection) {
+        if (sampleWithDirection.IN_NAME.includes('_A_')) {
+          finalDirection = "Прямое";
+        } else if (sampleWithDirection.IN_NAME.includes('_B_')) {
+          finalDirection = "Обратное";
+        }
+      } else if (confirmedTransactions[0].IN_NAME) {
+         // Fallback check on first transaction even if no _A_ or _B_ tag found via include
+         if (confirmedTransactions[0].IN_NAME.includes('_A_')) finalDirection = "Прямое";
+         else if (confirmedTransactions[0].IN_NAME.includes('_B_')) finalDirection = "Обратное";
+      }
+    }
+
     results.push({
       date: flight.date_str,
       route: flight.route,
@@ -392,6 +417,7 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
       status: isConfirmed ? 'Подтверждено' : 'Не подтверждено',
       tripNo: selectedTripNo,
       mileage: isConfirmed ? flight.actual_work_km : 0,
+      direction: finalDirection,
       transCount: confirmedTransactions.length,
       openTimes: confirmedTransactions.map(t => t.TIME).join('; '),
       closeTimes: confirmedTransactions.map(t => t.CR_TIME).join('; ')
@@ -421,6 +447,7 @@ export async function generateExcel(results: ReconciliationResult[]): Promise<Bl
     { header: 'Статус подтверждения', key: 'status', width: 20 },
     { header: 'Номер рейса', key: 'tripNo', width: 15 },
     { header: 'Фактическая транспортная работа (км)', key: 'mileage', width: 25 },
+    { header: 'Направление', key: 'direction', width: 20 },
     { header: 'Кол-во транзакций', key: 'transCount', width: 15 },
     { header: 'Время открытия транзакции', key: 'openTimes', width: 40 },
     { header: 'Время закрытия транзакции', key: 'closeTimes', width: 40 }
