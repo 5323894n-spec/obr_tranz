@@ -33,8 +33,16 @@ export interface TransactionRow {
   TRIP_NO: string;
   CR_TIME: string;
   IN_NAME: string;
+  CONDUCTOR: string;
   tran_datetime: Date | null;
   vreg_norm: string;
+}
+
+export interface KrcRow {
+  route: string;
+  conductor: string;
+  time: string;
+  datetime: Date | null;
 }
 
 export interface ReconciliationResult {
@@ -49,6 +57,7 @@ export interface ReconciliationResult {
   transCount: number;
   openTimes: string;
   closeTimes: string;
+  krcStatus: string;
 }
 
 export interface ReconciliationMetadata {
@@ -59,7 +68,7 @@ export interface ReconciliationMetadata {
 
 export interface ReconciliationResponse {
   results: ReconciliationResult[];
-  stats: { confirmed: number; unconfirmed: number };
+  stats: { confirmed: number; unconfirmed: number; krcChecks: number };
   metadata: ReconciliationMetadata;
 }
 
@@ -150,9 +159,70 @@ export function detectSeparator(text: string): string {
   return semiCount >= commaCount ? ';' : ',';
 }
 
-export async function reconcileFiles(prilFile: File, transFile: File, tripDurationMinutes: number = 120): Promise<ReconciliationResponse> {
+export async function reconcileFiles(
+  prilFile: File, 
+  transFile: File, 
+  tripDurationMinutes: number = 120,
+  krcFile?: File | null
+): Promise<ReconciliationResponse> {
+  const findKey = (obj: any, target: string | string[]) => {
+    const keys = Object.keys(obj);
+    const targets = Array.isArray(target) ? target.map(t => t.toLowerCase()) : [target.toLowerCase()];
+    return keys.find(k => targets.includes(k.trim().toLowerCase()));
+  };
+
   const prilText = await readFileAsText(prilFile);
   const transText = await readFileAsText(transFile);
+  
+  let krcData: KrcRow[] = [];
+  if (krcFile) {
+    const krcText = await readFileAsText(krcFile);
+    const krcSep = detectSeparator(krcText);
+    const krcRowsRaw = await parseCsvLocal(krcText, krcSep);
+    
+    for (const row of krcRowsRaw) {
+      const kRoute = findKey(row, ['№ маршрута', 'Маршрут', 'Route', 'Route Num']);
+      const kConductor = findKey(row, ['ФИО кондуктора', 'Кондуктор', 'Conductor', 'ФИО']);
+      const kTime = findKey(row, ['Время', 'Time', 'Дата и время']);
+      const kDate = findKey(row, ['Дата', 'Date']);
+
+      const route = (kRoute ? row[kRoute] : '').trim();
+      const conductor = (kConductor ? row[kConductor] : '').trim();
+      const timeStr = (kTime ? row[kTime] : '').trim();
+      const dateStr = (kDate ? row[kDate] : '').trim();
+
+      let datetime: Date | null = null;
+      if (timeStr) {
+        // Simple attempt to parse date/time from KRC
+        const fullStr = dateStr ? `${dateStr} ${timeStr}` : timeStr;
+        const d = new Date(fullStr);
+        if (!isNaN(d.getTime())) {
+          datetime = d;
+        } else {
+           // Try specific parsing if standard fails
+           const parts = timeStr.split(/[\s,:]/);
+           if (parts.length >= 2) {
+             const now = new Date();
+             const h = parseInt(parts[0]);
+             const m = parseInt(parts[1]);
+             if (!isNaN(h) && !isNaN(m)) {
+               now.setHours(h, m, 0, 0);
+               datetime = now;
+             }
+           }
+        }
+      }
+
+      if (route || conductor) {
+        krcData.push({
+          route,
+          conductor,
+          time: timeStr,
+          datetime
+        });
+      }
+    }
+  }
 
   const prilSep = detectSeparator(prilText);
   const transSep = detectSeparator(transText);
@@ -162,12 +232,6 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
 
   const prilData: PrilRow[] = [];
   const transData: TransactionRow[] = [];
-
-  const findKey = (obj: any, target: string | string[]) => {
-    const keys = Object.keys(obj);
-    const targets = Array.isArray(target) ? target.map(t => t.toLowerCase()) : [target.toLowerCase()];
-    return keys.find(k => targets.includes(k.trim().toLowerCase()));
-  };
 
   let detectedRoute = "";
   let detectedMonth = "";
@@ -266,11 +330,13 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
     const kTrip = findKey(row, ['TRIP_NO', 'Рейс', 'Trip']);
     const kCrTime = findKey(row, ['CR_TIME', 'Время закрытия', 'Close Time']);
     const kInName = findKey(row, ['IN_NAME', 'Остановка', 'Stop Name']);
+    const kConductor = findKey(row, ['CONDUCTOR', 'Кондуктор', 'ФИО кондуктора']);
 
     const date = (kDate ? row[kDate] : '').trim();
     const time = (kTime ? row[kTime] : '').trim();
     const vregNum = (kVreg ? row[kVreg] : '').trim();
     const inName = (kInName ? row[kInName] : '').trim();
+    const conductor = (kConductor ? row[kConductor] : '').trim();
     
     let tranDatetime: Date | null = null;
     if (date && time) {
@@ -322,6 +388,7 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
         TRIP_NO: (kTrip ? row[kTrip] : '').trim(),
         CR_TIME: (kCrTime ? row[kCrTime] : '').trim(),
         IN_NAME: inName,
+        CONDUCTOR: conductor,
         tran_datetime: tranDatetime,
         vreg_norm: normalizeGrz(vregNum)
       });
@@ -331,6 +398,7 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
   const results: ReconciliationResult[] = [];
   let confirmedCount = 0;
   let unconfirmedCount = 0;
+  let krcCheckCount = 0;
 
   for (const flight of prilData) {
     const potentialTrans = transData.filter(t => {
@@ -409,6 +477,41 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
       }
     }
 
+    // KRC Matching Logic
+    let krcStatus = krcFile ? "Проверка не проводилась" : "";
+    if (krcFile && confirmedTransactions.length > 0) {
+      const flightRoute = flight.route;
+      const tranStart = confirmedTransactions[0].tran_datetime;
+      const tranEnd = confirmedTransactions[confirmedTransactions.length - 1].tran_datetime;
+      const conductors = Array.from(new Set(confirmedTransactions.map(t => t.CONDUCTOR).filter(Boolean)));
+
+      if (tranStart && tranEnd) {
+        const foundMatch = krcData.some(k => {
+          const routeMatch = k.route === flightRoute || flightRoute.includes(k.route) || k.route.includes(flightRoute);
+          if (!routeMatch) return false;
+
+          const conductorMatch = conductors.some(c => 
+            c.toLowerCase().includes(k.conductor.toLowerCase()) || 
+            k.conductor.toLowerCase().includes(c.toLowerCase())
+          );
+          if (!conductorMatch) return false;
+
+          if (k.datetime) {
+            // Buffer of 30 mins around transactions window for KRC check
+            const buffer = 30 * 60000;
+            return k.datetime >= new Date(tranStart.getTime() - buffer) && 
+                   k.datetime <= new Date(tranEnd.getTime() + buffer);
+          }
+          return true; // If no datetime in KRC, match by route/conductor only
+        });
+
+        if (foundMatch) {
+          krcStatus = "Проверка проводилась";
+          krcCheckCount++;
+        }
+      }
+    }
+
     results.push({
       date: flight.date_str,
       route: flight.route,
@@ -420,13 +523,18 @@ export async function reconcileFiles(prilFile: File, transFile: File, tripDurati
       direction: finalDirection,
       transCount: confirmedTransactions.length,
       openTimes: confirmedTransactions.map(t => t.TIME).join('; '),
-      closeTimes: confirmedTransactions.map(t => t.CR_TIME).join('; ')
+      closeTimes: confirmedTransactions.map(t => t.CR_TIME).join('; '),
+      krcStatus: krcStatus
     });
   }
 
   return { 
     results, 
-    stats: { confirmed: confirmedCount, unconfirmed: unconfirmedCount },
+    stats: { 
+      confirmed: confirmedCount, 
+      unconfirmed: unconfirmedCount,
+      krcChecks: krcCheckCount
+    },
     metadata: {
       route: detectedRoute || "неизвестно",
       month: detectedMonth || "неизвестно",
@@ -449,6 +557,7 @@ export async function generateExcel(results: ReconciliationResult[]): Promise<Bl
     { header: 'Фактическая транспортная работа (км)', key: 'mileage', width: 25 },
     { header: 'Направление', key: 'direction', width: 20 },
     { header: 'Кол-во транзакций', key: 'transCount', width: 15 },
+    { header: 'Проверка КРС', key: 'krcStatus', width: 20 },
     { header: 'Время открытия транзакции', key: 'openTimes', width: 40 },
     { header: 'Время закрытия транзакции', key: 'closeTimes', width: 40 }
   ];

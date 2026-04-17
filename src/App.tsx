@@ -5,13 +5,15 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Progress } from '@/components/ui/progress';
-import { FileCheck, FileText, Download, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { FileCheck, FileText, Download, Loader2, AlertCircle, CheckCircle2, History, ClipboardCheck } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { reconcileFiles, generateExcel, ReconciliationResult } from '@/lib/reconciliation';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 interface Stats {
   confirmed: number;
   unconfirmed: number;
+  krcChecks: number;
 }
 
 export default function App() {
@@ -23,6 +25,8 @@ export default function App() {
   const [results, setResults] = useState<ReconciliationResult[] | null>(null);
   const [metadata, setMetadata] = useState<{ route: string; month: string; year: string } | null>(null);
   const [tripDuration, setTripDuration] = useState<number>(120);
+  const [krcFile, setKrcFile] = useState<File | null>(null);
+  const [activeTab, setActiveTab] = useState('reconcile');
 
   const handleProcess = async () => {
     if (!prilFile || !transFile) {
@@ -38,7 +42,7 @@ export default function App() {
 
     try {
       // Process files locally in the browser
-      const { results: reconResults, stats: reconStats, metadata: reconMeta } = await reconcileFiles(prilFile, transFile, tripDuration);
+      const { results: reconResults, stats: reconStats, metadata: reconMeta } = await reconcileFiles(prilFile, transFile, tripDuration, krcFile);
       
       setStats(reconStats);
       setResults(reconResults);
@@ -141,6 +145,13 @@ export default function App() {
               {stats ? stats.unconfirmed : '50'}
             </div>
           </div>
+
+          <div className="bg-[#b8d9e9] p-5 rounded-xl border-b-[8px] border-[#0070BA] shadow-sm">
+            <div className="text-[10px] uppercase tracking-wider text-[#1d3644] font-bold mb-1 opacity-70">Проверок КРС</div>
+            <div className="text-2xl font-bold">
+              {stats ? stats.krcChecks : '0'}
+            </div>
+          </div>
         </div>
 
         <div className="mt-auto">
@@ -155,77 +166,111 @@ export default function App() {
       <main className="flex-1 p-16 flex flex-col items-start max-w-5xl relative z-10">
         <header className="mb-10 w-full text-left">
           <h1 className="text-4xl font-bold mb-2 text-[#1d3644]">Сверка данных</h1>
-          <p className="text-[#648191]">Загрузите исходные файлы для формирования аналитического отчета Excel.</p>
+          <p className="text-[#648191]">Выберите тип сверки и загрузите файлы для формирования отчета.</p>
         </header>
 
-        <div className="flex flex-col gap-8 w-full">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full">
-            {/* Pril File Dropzone */}
-            <div 
-              className={`relative h-[220px] rounded-[32px] flex flex-col items-center justify-center p-8 text-center transition-all cursor-pointer ${prilFile ? 'bg-white border-2 border-[#4bb34b] shadow-lg' : 'bg-[#e1f0f7] border-none hover:bg-[#d5eaf5]'}`}
-              onClick={() => document.getElementById('pril')?.click()}
+        <Tabs defaultValue="reconcile" className="w-full" onValueChange={setActiveTab}>
+          <TabsList className="bg-[#e1f0f7] p-1 h-14 rounded-2xl mb-8 border border-[#c9dde9]">
+            <TabsTrigger 
+              value="reconcile" 
+              className="rounded-xl px-8 h-full font-bold text-[#1d3644] data-[state=active]:bg-white data-[state=active]:shadow-sm transition-all"
             >
-              <input
-                id="pril"
-                type="file"
-                accept=".csv"
-                className="hidden"
-                onChange={(e) => setPrilFile(e.target.files?.[0] || null)}
-              />
-              <div className="relative mb-4">
-                <div className="w-12 h-16 bg-[#1d3644] rounded-lg -rotate-3 flex items-center justify-center text-white">
-                  <FileText className="w-8 h-8 opacity-40" />
+              Сверка рейсов
+            </TabsTrigger>
+            <TabsTrigger 
+              value="krc" 
+              className="rounded-xl px-8 h-full font-bold text-[#1d3644] data-[state=active]:bg-white data-[state=active]:shadow-sm transition-all"
+            >
+              Отчет KRC
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="reconcile" className="m-0 space-y-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full">
+              {/* Pril File Dropzone */}
+              <div 
+                className={`relative h-[220px] rounded-[32px] flex flex-col items-center justify-center p-8 text-center transition-all cursor-pointer ${prilFile ? 'bg-white border-2 border-[#4bb34b] shadow-lg' : 'bg-[#e1f0f7] border-none hover:bg-[#d5eaf5]'}`}
+                onClick={() => document.getElementById('pril')?.click()}
+              >
+                <input id="pril" type="file" accept=".csv" className="hidden" onChange={(e) => setPrilFile(e.target.files?.[0] || null)} />
+                <div className="relative mb-4">
+                  <div className="w-12 h-16 bg-[#1d3644] rounded-lg -rotate-3 flex items-center justify-center text-white">
+                    <FileText className="w-8 h-8 opacity-40" />
+                  </div>
+                  {prilFile && <div className="absolute -top-2 -right-2 bg-[#4bb34b] rounded-full p-1"><CheckCircle2 className="w-4 h-4 text-white" /></div>}
                 </div>
-                {prilFile && <div className="absolute -top-2 -right-2 bg-[#4bb34b] rounded-full p-1"><CheckCircle2 className="w-4 h-4 text-white" /></div>}
+                <strong className="block text-sm text-[#1d3644]">Подтверждаемые рейсы (pril.csv)</strong>
+                <p className="text-xs text-[#648191] mt-2">{prilFile ? prilFile.name : 'Перетащите файл или нажмите для выбора'}</p>
               </div>
-              <strong className="block text-sm text-[#1d3644]">Подтверждаемые рейсы (pril.csv)</strong>
-              <p className="text-xs text-[#648191] mt-2">
-                {prilFile ? prilFile.name : 'Перетащите файл или нажмите для выбора'}
-              </p>
+
+              {/* Transactions File Dropzone */}
+              <div 
+                className={`relative h-[220px] rounded-[32px] flex flex-col items-center justify-center p-8 text-center transition-all cursor-pointer ${transFile ? 'bg-white border-2 border-[#0076b3] shadow-lg' : 'bg-[#e1f0f7] border-none hover:bg-[#d5eaf5]'}`}
+                onClick={() => document.getElementById('trans')?.click()}
+              >
+                <input id="trans" type="file" accept=".csv" className="hidden" onChange={(e) => setTransFile(e.target.files?.[0] || null)} />
+                <div className="relative mb-4">
+                  <div className="w-12 h-16 bg-[#1d3644] rounded-lg rotate-3 flex items-center justify-center text-white">
+                    <FileCheck className="w-8 h-8 opacity-40" />
+                  </div>
+                  {transFile && <div className="absolute -top-2 -right-2 bg-[#0076b3] rounded-full p-1"><CheckCircle2 className="w-4 h-4 text-white" /></div>}
+                </div>
+                <strong className="block text-sm text-[#1d3644]">Реестр транзакций (transactions.csv)</strong>
+                <p className="text-xs text-[#648191] mt-2">{transFile ? transFile.name : 'Перетащите файл или нажмите для выбора'}</p>
+              </div>
             </div>
 
-            {/* Transactions File Dropzone */}
-            <div 
-              className={`relative h-[220px] rounded-[32px] flex flex-col items-center justify-center p-8 text-center transition-all cursor-pointer ${transFile ? 'bg-white border-2 border-[#0076b3] shadow-lg' : 'bg-[#e1f0f7] border-none hover:bg-[#d5eaf5]'}`}
-              onClick={() => document.getElementById('trans')?.click()}
-            >
-              <input
-                id="trans"
-                type="file"
-                accept=".csv"
-                className="hidden"
-                onChange={(e) => setTransFile(e.target.files?.[0] || null)}
-              />
-              <div className="relative mb-4">
-                <div className="w-12 h-16 bg-[#1d3644] rounded-lg rotate-3 flex items-center justify-center text-white">
-                  <FileCheck className="w-8 h-8 opacity-40" />
-                </div>
-                {transFile && <div className="absolute -top-2 -right-2 bg-[#0076b3] rounded-full p-1"><CheckCircle2 className="w-4 h-4 text-white" /></div>}
+            <div className="w-[450px] bg-white border-[3px] border-[#00aeef] rounded-[24px] p-8 shadow-sm overflow-hidden flex flex-col items-start gap-3">
+              <Label htmlFor="duration" className="text-xs font-bold uppercase tracking-wider text-[#1d3644] opacity-80">Длительность рейса (минуты)</Label>
+              <div className="flex items-center gap-4 w-full">
+                <Input id="duration" type="number" value={tripDuration} onChange={(e) => setTripDuration(parseInt(e.target.value) || 0)} className="font-bold text-xl h-14 border-none bg-[#eaf4f9] px-6 rounded-2xl flex-1 focus-visible:ring-0" />
+                <span className="text-[#1d3644] text-lg font-bold">мин</span>
               </div>
-              <strong className="block text-sm text-[#1d3644]">Реестр транзакций (transactions.csv)</strong>
-              <p className="text-xs text-[#648191] mt-2">
-                {transFile ? transFile.name : 'Перетащите файл или нажмите для выбора'}
-              </p>
+              <p className="text-[10px] text-[#648191] mt-1 italic">Окно поиска транзакций после времени начала рейса.</p>
             </div>
-          </div>
+          </TabsContent>
 
-          <div className="w-[450px] bg-white border-[3px] border-[#00aeef] rounded-[24px] p-8 shadow-sm overflow-hidden flex flex-col items-start gap-3">
-            <Label htmlFor="duration" className="text-xs font-bold uppercase tracking-wider text-[#1d3644] opacity-80">
-              Длительность рейса (минуты)
-            </Label>
-            <div className="flex items-center gap-4 w-full">
-              <Input
-                id="duration"
-                type="number"
-                value={tripDuration}
-                onChange={(e) => setTripDuration(parseInt(e.target.value) || 0)}
-                className="font-bold text-xl h-14 border-none bg-[#eaf4f9] px-6 rounded-2xl flex-1 focus-visible:ring-0"
-              />
-              <span className="text-[#1d3644] text-lg font-bold">мин</span>
+          <TabsContent value="krc" className="m-0 space-y-8">
+            <div className="w-full">
+              {/* KRC File Dropzone */}
+              <div 
+                className={`relative h-[280px] rounded-[40px] flex flex-col items-center justify-center p-12 text-center transition-all cursor-pointer ${krcFile ? 'bg-white border-2 border-[#0070BA] shadow-lg' : 'bg-[#e1f0f7] border-none hover:bg-[#d5eaf5]'}`}
+                onClick={() => document.getElementById('krc')?.click()}
+              >
+                <input id="krc" type="file" accept=".csv,.xlsx" className="hidden" onChange={(e) => setKrcFile(e.target.files?.[0] || null)} />
+                <div className="relative mb-6">
+                  <div className="w-16 h-20 bg-[#1d3644] rounded-xl flex items-center justify-center text-white">
+                    <ClipboardCheck className="w-10 h-10 opacity-40" />
+                  </div>
+                  {krcFile && <div className="absolute -top-2 -right-2 bg-[#0070BA] rounded-full p-2 shadow-sm"><CheckCircle2 className="w-5 h-5 text-white" /></div>}
+                </div>
+                <h3 className="text-xl font-bold text-[#1d3644] mb-2">Отчет KRC</h3>
+                <p className="text-[#648191] max-w-sm mx-auto">
+                  {krcFile ? krcFile.name : 'Загрузите файл отчета KRC для интеграции данных в общую сверку.'}
+                </p>
+                <div className="mt-6 px-4 py-2 bg-white/50 rounded-full text-[10px] font-bold text-[#0070BA] uppercase tracking-wider">
+                  Поддерживаемые форматы: .CSV, .XLSX
+                </div>
+              </div>
+
+              {krcFile && (
+                 <motion.div 
+                  initial={{ opacity: 0, y: 10 }} 
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mt-8 p-6 bg-white border-2 border-[#e1f0f7] rounded-[32px] flex items-center gap-4"
+                >
+                  <div className="p-3 bg-[#e1f0f7] rounded-2xl">
+                    <History className="w-6 h-6 text-[#0070BA]" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-[#1d3644]">Файл готов к обработке</h4>
+                    <p className="text-sm text-[#648191]">Нажмите на кнопку ниже, чтобы начать анализ данных KRC.</p>
+                  </div>
+                </motion.div>
+              )}
             </div>
-            <p className="text-[10px] text-[#648191] mt-1 italic">Окно поиска транзакций после времени начала рейса.</p>
-          </div>
-        </div>
+          </TabsContent>
+        </Tabs>
 
         <div className="flex items-center gap-10 mt-12 w-full">
           <Button
@@ -235,10 +280,10 @@ export default function App() {
           >
             {loading ? (
               <>
-                <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Сверка...
+                <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Обработка...
               </>
             ) : (
-              'Сформировать отчет Excel'
+              'Сформировать итоговый отчет'
             )}
           </Button>
 
@@ -253,11 +298,15 @@ export default function App() {
 
           <button
             onClick={() => {
-              setPrilFile(null);
-              setTransFile(null);
-              setStats(null);
-              setResults(null);
-              setMetadata(null);
+              if (activeTab === 'reconcile') {
+                setPrilFile(null);
+                setTransFile(null);
+                setStats(null);
+                setResults(null);
+                setMetadata(null);
+              } else {
+                setKrcFile(null);
+              }
               setError(null);
             }}
             className="text-[#648191] font-bold text-lg hover:text-[#1d3644] transition-colors"
