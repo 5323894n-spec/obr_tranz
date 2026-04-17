@@ -14,6 +14,7 @@ interface Stats {
   confirmed: number;
   unconfirmed: number;
   krcChecks: number;
+  totalMileage: number;
 }
 
 export default function App() {
@@ -150,6 +151,13 @@ export default function App() {
             <div className="text-[10px] uppercase tracking-wider text-[#1d3644] font-bold mb-1 opacity-70">Проверок КРС</div>
             <div className="text-2xl font-bold">
               {stats ? stats.krcChecks : '0'}
+            </div>
+          </div>
+
+          <div className="bg-[#b8d9e9] p-5 rounded-xl border-b-[8px] border-[#00aeef] shadow-sm">
+            <div className="text-[10px] uppercase tracking-wider text-[#1d3644] font-bold mb-1 opacity-70">Подтвержденный пробег</div>
+            <div className="text-2xl font-bold">
+              {stats ? `${stats.totalMileage.toFixed(2)} км` : '0.00 км'}
             </div>
           </div>
         </div>

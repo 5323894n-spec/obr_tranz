@@ -68,7 +68,7 @@ export interface ReconciliationMetadata {
 
 export interface ReconciliationResponse {
   results: ReconciliationResult[];
-  stats: { confirmed: number; unconfirmed: number; krcChecks: number };
+  stats: { confirmed: number; unconfirmed: number; krcChecks: number; totalMileage: number };
   metadata: ReconciliationMetadata;
 }
 
@@ -399,6 +399,7 @@ export async function reconcileFiles(
   let confirmedCount = 0;
   let unconfirmedCount = 0;
   let krcCheckCount = 0;
+  let totalConfirmedMileage = 0;
 
   for (const flight of prilData) {
     const potentialTrans = transData.filter(t => {
@@ -459,7 +460,10 @@ export async function reconcileFiles(
     }
 
     const isConfirmed = selectedTripNo !== "";
-    if (isConfirmed) confirmedCount++; else unconfirmedCount++;
+    if (isConfirmed) {
+      confirmedCount++;
+      totalConfirmedMileage += flight.actual_work_km;
+    } else unconfirmedCount++;
 
     let finalDirection = flight.direction;
     if (confirmedTransactions.length > 0) {
@@ -533,7 +537,8 @@ export async function reconcileFiles(
     stats: { 
       confirmed: confirmedCount, 
       unconfirmed: unconfirmedCount,
-      krcChecks: krcCheckCount
+      krcChecks: krcCheckCount,
+      totalMileage: totalConfirmedMileage
     },
     metadata: {
       route: detectedRoute || "неизвестно",
