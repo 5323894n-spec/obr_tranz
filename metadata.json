@@ -1,6 +1,6 @@
 {
-  "name": "Remix2Транспортная Сверка",
-  "description": "Программа для сверки рейсов и транзакций с формированием отчета в Excel",
+  "name": "Транспортная Сверка",
+  "description": "Приложение для сверки рейсов, транзакций и отчетов KRC",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }
