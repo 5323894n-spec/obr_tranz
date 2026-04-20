@@ -7,7 +7,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Progress } from '@/components/ui/progress';
 import { FileCheck, FileText, Download, Loader2, AlertCircle, CheckCircle2, History, ClipboardCheck } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { reconcileFiles, generateExcel, ReconciliationResult } from '@/lib/reconciliation';
+import { reconcileFiles, generateExcel, generateCsv, ReconciliationResult, parseExcelReport, parseCsvReport, parseKrcFile, enrichReportWithKrc } from '@/lib/reconciliation';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 interface Stats {
@@ -15,6 +15,7 @@ interface Stats {
   unconfirmed: number;
   krcChecks: number;
   totalMileage: number;
+  totalPlannedMileage: number;
 }
 
 export default function App() {
@@ -26,12 +27,15 @@ export default function App() {
   const [results, setResults] = useState<ReconciliationResult[] | null>(null);
   const [metadata, setMetadata] = useState<{ route: string; month: string; year: string } | null>(null);
   const [tripDuration, setTripDuration] = useState<number>(120);
+  const [forwardMileage, setForwardMileage] = useState<number>(0);
+  const [returnMileage, setReturnMileage] = useState<number>(0);
   const [krcFile, setKrcFile] = useState<File | null>(null);
+  const [reportFile, setReportFile] = useState<File | null>(null);
   const [activeTab, setActiveTab] = useState('reconcile');
 
   const handleProcess = async () => {
     if (!prilFile || !transFile) {
-      setError('Пожалуйста, выберите оба файла для сверки.');
+      setError('Пожалуйста, выберите оба файла для сверки (Приложение и Транзакции).');
       return;
     }
 
@@ -42,10 +46,11 @@ export default function App() {
     setMetadata(null);
 
     try {
-      // Process files locally in the browser
-      const { results: reconResults, stats: reconStats, metadata: reconMeta } = await reconcileFiles(prilFile, transFile, tripDuration, krcFile);
-      
-      setStats(reconStats);
+      const { results: reconResults, stats: reconStats, metadata: reconMeta } = await reconcileFiles(prilFile, transFile, tripDuration, null, forwardMileage, returnMileage);
+      setStats({
+        ...reconStats,
+        totalPlannedMileage: reconResults.reduce((sum, r) => sum + (r.plannedMileage || 0), 0)
+      });
       setResults(reconResults);
       setMetadata(reconMeta);
     } catch (err) {
@@ -56,25 +61,77 @@ export default function App() {
     }
   };
 
+  const handleKrcStage2 = async () => {
+    if (!krcFile) {
+      setError('Пожалуйста, выберите файл Отчета КРС.');
+      return;
+    }
+
+    if (!results || results.length === 0) {
+      setError('Сначала выполните первый этап сверки (Сформируйте итоговый отчет).');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Use results already in memory from Stage 1
+      const reportResults = [...results];
+
+      // 2. Parse KRC data
+      const krcData = await parseKrcFile(krcFile);
+      if (krcData.length === 0) {
+        throw new Error("Не удалось найти данные в файле КРС.");
+      }
+
+      // 3. Enrich with KRC
+      const enriched = await enrichReportWithKrc(reportResults, krcData);
+      
+      const confirmed = enriched.filter(r => r.status === 'Подтверждено').length;
+      const krcCount = enriched.filter(r => r.krcStatus.includes('время проверки')).length;
+      const totalMileage = enriched.reduce((sum, r) => sum + r.mileage, 0);
+      const totalPlannedMileage = enriched.reduce((sum, r) => sum + (r.plannedMileage || 0), 0);
+
+      setResults(enriched);
+      setStats({
+        confirmed,
+        unconfirmed: enriched.length - confirmed,
+        krcChecks: krcCount,
+        totalMileage,
+        totalPlannedMileage
+      });
+      setMetadata({ route: metadata?.route || "из отчета", month: metadata?.month || "", year: metadata?.year || "" });
+    } catch (err) {
+      console.error('KRC Stage 2 error:', err);
+      setError(err instanceof Error ? err.message : 'Ошибка при объединении с КРС');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleDownload = async () => {
     if (!results || !metadata) return;
 
     try {
       setLoading(true);
-      const blob = await generateExcel(results);
+      // Stage 1 default is CSV now as requested, Stage 2 (enriched) will still use Excel but can be switched
+      const isStage2 = activeTab === 'krc';
+      const blob = isStage2 ? await generateExcel(results) : await generateCsv(results);
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
+      const extension = isStage2 ? 'xlsx' : 'csv';
       const filename = metadata.route !== "неизвестно" 
-        ? `сверка по маршруту ${metadata.route} за ${metadata.month} ${metadata.year}.xlsx`
-        : `Отчет.xlsx`;
+        ? `сверка по маршруту ${metadata.route} за ${metadata.month} ${metadata.year}.${extension}`
+        : `Отчет.${extension}`;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
     } catch (err) {
-      setError('Ошибка при генерации Excel-файла');
+      setError('Ошибка при генерации файла');
     } finally {
       setLoading(false);
     }
@@ -160,6 +217,13 @@ export default function App() {
               {stats ? `${stats.totalMileage.toFixed(2)} км` : '0.00 км'}
             </div>
           </div>
+
+          <div className="bg-[#b8d9e9] p-5 rounded-xl border-b-[8px] border-[#648191] shadow-sm">
+            <div className="text-[10px] uppercase tracking-wider text-[#1d3644] font-bold mb-1 opacity-70">Плановый пробег</div>
+            <div className="text-2xl font-bold">
+              {stats ? `${stats.totalPlannedMileage.toFixed(2)} км` : '0.00 км'}
+            </div>
+          </div>
         </div>
 
         <div className="mt-auto">
@@ -228,72 +292,95 @@ export default function App() {
               </div>
             </div>
 
-            <div className="w-[450px] bg-white border-[3px] border-[#00aeef] rounded-[24px] p-8 shadow-sm overflow-hidden flex flex-col items-start gap-3">
-              <Label htmlFor="duration" className="text-xs font-bold uppercase tracking-wider text-[#1d3644] opacity-80">Длительность рейса (минуты)</Label>
-              <div className="flex items-center gap-4 w-full">
-                <Input id="duration" type="number" value={tripDuration} onChange={(e) => setTripDuration(parseInt(e.target.value) || 0)} className="font-bold text-xl h-14 border-none bg-[#eaf4f9] px-6 rounded-2xl flex-1 focus-visible:ring-0" />
-                <span className="text-[#1d3644] text-lg font-bold">мин</span>
+            <div className="flex gap-8 w-full">
+              <div className="flex-1 bg-white border-[3px] border-[#00aeef] rounded-[24px] p-8 shadow-sm overflow-hidden flex flex-col items-start gap-3">
+                <Label htmlFor="duration" className="text-xs font-bold uppercase tracking-wider text-[#1d3644] opacity-80">Длительность рейса (минуты)</Label>
+                <div className="flex items-center gap-4 w-full">
+                  <Input id="duration" type="number" value={tripDuration} onChange={(e) => setTripDuration(parseInt(e.target.value) || 0)} className="font-bold text-xl h-14 border-none bg-[#eaf4f9] px-6 rounded-2xl flex-1 focus-visible:ring-0" />
+                  <span className="text-[#1d3644] text-lg font-bold">мин</span>
+                </div>
+                <p className="text-[10px] text-[#648191] mt-1 italic">Окно поиска транзакций после времени начала рейса.</p>
               </div>
-              <p className="text-[10px] text-[#648191] mt-1 italic">Окно поиска транзакций после времени начала рейса.</p>
+
+              <div className="flex-1 bg-white border-[3px] border-[#4bb34b] rounded-[24px] p-8 shadow-sm overflow-hidden flex flex-col items-start gap-3">
+                <Label htmlFor="forward" className="text-xs font-bold uppercase tracking-wider text-[#1d3644] opacity-80">Прямое направление (км)</Label>
+                <div className="flex items-center gap-4 w-full">
+                  <Input id="forward" type="number" step="0.01" value={forwardMileage} onChange={(e) => setForwardMileage(parseFloat(e.target.value) || 0)} className="font-bold text-xl h-14 border-none bg-[#eaf4f9] px-6 rounded-2xl flex-1 focus-visible:ring-0" />
+                  <span className="text-[#1d3644] text-lg font-bold">км</span>
+                </div>
+                <p className="text-[10px] text-[#648191] mt-1 italic">Плановый пробег для прямого направления.</p>
+              </div>
+
+              <div className="flex-1 bg-white border-[3px] border-[#e23e3e] rounded-[24px] p-8 shadow-sm overflow-hidden flex flex-col items-start gap-3">
+                <Label htmlFor="return" className="text-xs font-bold uppercase tracking-wider text-[#1d3644] opacity-80">Обратное направление (км)</Label>
+                <div className="flex items-center gap-4 w-full">
+                  <Input id="return" type="number" step="0.01" value={returnMileage} onChange={(e) => setReturnMileage(parseFloat(e.target.value) || 0)} className="font-bold text-xl h-14 border-none bg-[#eaf4f9] px-6 rounded-2xl flex-1 focus-visible:ring-0" />
+                  <span className="text-[#1d3644] text-lg font-bold">км</span>
+                </div>
+                <p className="text-[10px] text-[#648191] mt-1 italic">Плановый пробег для обратного направления.</p>
+              </div>
             </div>
           </TabsContent>
 
           <TabsContent value="krc" className="m-0 space-y-8">
-            <div className="w-full">
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="text-xl font-bold text-[#1d3644]">Этап 2: Интеграция данных КРС</h3>
+              {results && (
+                <div className="text-xs text-[#648191] bg-white px-3 py-1 rounded-full border border-[#e1f0f7]">
+                  Найдено записей: <span className="text-[#1d3644] font-bold">{results.length}</span>
+                </div>
+              )}
+            </div>
+            
+            <div className="grid grid-cols-1 gap-8 w-full max-w-xl">
               {/* KRC File Dropzone */}
               <div 
-                className={`relative h-[280px] rounded-[40px] flex flex-col items-center justify-center p-12 text-center transition-all cursor-pointer ${krcFile ? 'bg-white border-2 border-[#0070BA] shadow-lg' : 'bg-[#e1f0f7] border-none hover:bg-[#d5eaf5]'}`}
+                className={`relative h-[240px] rounded-[32px] flex flex-col items-center justify-center p-8 text-center transition-all cursor-pointer ${krcFile ? 'bg-white border-2 border-[#0070BA] shadow-lg' : 'bg-[#e1f0f7] border-none hover:bg-[#d5eaf5]'}`}
                 onClick={() => document.getElementById('krc')?.click()}
               >
                 <input id="krc" type="file" accept=".csv,.xlsx" className="hidden" onChange={(e) => setKrcFile(e.target.files?.[0] || null)} />
-                <div className="relative mb-6">
-                  <div className="w-16 h-20 bg-[#1d3644] rounded-xl flex items-center justify-center text-white">
-                    <ClipboardCheck className="w-10 h-10 opacity-40" />
+                <div className="relative mb-4">
+                  <div className="w-12 h-16 bg-[#1d3644] rounded-lg flex items-center justify-center text-white">
+                    <ClipboardCheck className="w-8 h-8 opacity-40" />
                   </div>
-                  {krcFile && <div className="absolute -top-2 -right-2 bg-[#0070BA] rounded-full p-2 shadow-sm"><CheckCircle2 className="w-5 h-5 text-white" /></div>}
+                  {krcFile && <div className="absolute -top-2 -right-2 bg-[#0070BA] rounded-full p-1"><CheckCircle2 className="w-4 h-4 text-white" /></div>}
                 </div>
-                <h3 className="text-xl font-bold text-[#1d3644] mb-2">Отчет KRC</h3>
-                <p className="text-[#648191] max-w-sm mx-auto">
-                  {krcFile ? krcFile.name : 'Загрузите файл отчета KRC для интеграции данных в общую сверку.'}
-                </p>
-                <div className="mt-6 px-4 py-2 bg-white/50 rounded-full text-[10px] font-bold text-[#0070BA] uppercase tracking-wider">
-                  Поддерживаемые форматы: .CSV, .XLSX
-                </div>
+                <strong className="block text-sm text-[#1d3644]">Загрузите Отчет KRC</strong>
+                <p className="text-xs text-[#648191] mt-2 line-clamp-1">{krcFile ? krcFile.name : 'Данные о проверках КРС применятся к результатам 1 этапа'}</p>
               </div>
+            </div>
 
-              {krcFile && (
-                 <motion.div 
-                  initial={{ opacity: 0, y: 10 }} 
-                  animate={{ opacity: 1, y: 0 }}
-                  className="mt-8 p-6 bg-white border-2 border-[#e1f0f7] rounded-[32px] flex items-center gap-4"
-                >
-                  <div className="p-3 bg-[#e1f0f7] rounded-2xl">
-                    <History className="w-6 h-6 text-[#0070BA]" />
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-[#1d3644]">Файл готов к обработке</h4>
-                    <p className="text-sm text-[#648191]">Нажмите на кнопку ниже, чтобы начать анализ данных KRC.</p>
-                  </div>
-                </motion.div>
+            <div className="flex flex-col gap-4">
+               <Button
+                onClick={handleKrcStage2}
+                disabled={loading || !krcFile || !results}
+                className="w-full md:w-auto px-10 h-16 rounded-[20px] font-bold text-lg bg-[#0070BA] hover:bg-[#005f9e] text-white shadow-md transition-all disabled:opacity-50"
+              >
+                {loading ? <><Loader2 className="mr-2 h-5 w-5 animate-spin" /> Обработка...</> : 'Объединить с данными КРС'}
+              </Button>
+              {!results && !loading && (
+                <p className="text-xs text-[#e23e3e] font-bold">⚠️ Сначала сформируйте отчет на вкладке "Сверка рейсов"</p>
               )}
             </div>
           </TabsContent>
         </Tabs>
 
         <div className="flex items-center gap-10 mt-12 w-full">
-          <Button
-            onClick={handleProcess}
-            disabled={loading || !prilFile || !transFile}
-            className="px-12 h-20 rounded-[24px] font-extrabold text-xl bg-[#0070BA] hover:bg-[#005f9e] text-white shadow-lg transition-all disabled:opacity-50"
-          >
-            {loading ? (
-              <>
-                <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Обработка...
-              </>
-            ) : (
-              'Сформировать итоговый отчет'
-            )}
-          </Button>
+          {activeTab === 'reconcile' && (
+            <Button
+              onClick={handleProcess}
+              disabled={loading || !prilFile || !transFile}
+              className="px-12 h-20 rounded-[24px] font-extrabold text-xl bg-[#0070BA] hover:bg-[#005f9e] text-white shadow-lg transition-all disabled:opacity-50"
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="mr-3 h-6 w-6 animate-spin" /> Обработка...
+                </>
+              ) : (
+                'Сформировать промежуточный отчет'
+              )}
+            </Button>
+          )}
 
           {results && (
             <Button
@@ -314,6 +401,9 @@ export default function App() {
                 setMetadata(null);
               } else {
                 setKrcFile(null);
+                setReportFile(null);
+                setResults(null);
+                setStats(null);
               }
               setError(null);
             }}

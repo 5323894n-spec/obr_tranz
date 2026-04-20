@@ -1,6 +1,21 @@
 import Papa from 'papaparse';
 import ExcelJS from 'exceljs';
 
+/**
+ * Normalizes common homoglyphs between Cyrillic and Latin alphabets.
+ * This ensures "Фаренцева" with Latin 'A' matches "Фаренцева" with Cyrillic 'А'.
+ */
+export function normalizeHomoglyphs(text: string): string {
+  if (!text) return "";
+  const map: Record<string, string> = {
+    'A': 'А', 'B': 'В', 'C': 'С', 'E': 'Е', 'H': 'Н', 'K': 'К', 
+    'M': 'М', 'O': 'О', 'P': 'Р', 'T': 'Т', 'X': 'Х', 'y': 'у', 'Y': 'У',
+    'a': 'а', 'b': 'в', 'c': 'с', 'e': 'е', 'h': 'н', 'k': 'к',
+    'm': 'м', 'o': 'о', 'p': 'р', 't': 'т', 'x': 'х'
+  };
+  return text.split('').map(char => map[char] || char).join('');
+}
+
 export function normalizeGrz(grz: string): string {
   if (!grz) return "";
   let grzStr = String(grz).toUpperCase();
@@ -22,6 +37,7 @@ export interface PrilRow {
   grz_norm: string;
   actual_work_km: number;
   direction: string;
+  conductor: string;
   start_datetime: Date | null;
 }
 
@@ -59,6 +75,7 @@ export interface ReconciliationResult {
   openTimes: string;
   closeTimes: string;
   krcStatus: string;
+  plannedMileage?: number;
 }
 
 export interface ReconciliationMetadata {
@@ -89,12 +106,12 @@ export async function parseCsvLocal(content: string, separator: string = ';'): P
     }
 
     // Find the row that likely contains headers by checking for keywords
-    const keywords = ['дата', 'маршрут', 'грз', 'госномер', 'время', 'рейс', 'date', 'vreg', 'time', 'route', 'сутки', 'кондуктор', 'провод'];
+    const keywords = ['дата', 'маршрут', 'грз', 'госномер', 'время', 'рейс', 'date', 'vreg', 'time', 'route', 'сутки', 'кондуктор', 'провод', 'фио', 'номер', 'период', 'автобус', 'водитель', 'наименование'];
     let headerIndex = 0;
     let maxMatches = 0;
 
-    // Check first 20 rows
-    for (let i = 0; i < Math.min(rows.length, 20); i++) {
+    // Check first 30 rows for better coverage in complex files
+    for (let i = 0; i < Math.min(rows.length, 30); i++) {
       const row = rows[i];
       if (!Array.isArray(row)) continue;
       
@@ -165,11 +182,264 @@ export function detectSeparator(text: string): string {
   return semiCount >= commaCount ? ';' : ',';
 }
 
+export async function parseKrcFile(krcFile: File): Promise<KrcRow[]> {
+  const isExcel = krcFile.name.toLowerCase().endsWith('.xlsx');
+  let krcRowsRaw: any[] = [];
+  const krcData: KrcRow[] = [];
+  const keywords = ['дата', 'маршрут', 'грз', 'время', 'рейс', 'кондуктор', 'провод', 'марш', 'ффио', 'период', 'автобус', 'номер', 'водитель', 'проверка', 'контрол', 'тс', 'гос', 'бортовой', 'экспедитор', 'фио', 'fio', 'имя', 'фамилия', 'сотрудник', 'объект', 'время работы'];
+
+  if (isExcel) {
+    const workbook = new ExcelJS.Workbook();
+    const arrayBuffer = await krcFile.arrayBuffer();
+    await workbook.xlsx.load(arrayBuffer);
+    
+    workbook.eachSheet((worksheet) => {
+      let excelHeaders: string[] = [];
+      let headerRowIndex = 1;
+      
+      // Attempt 1: Look for rows with at least 2 keywords
+      for (let i = 1; i <= Math.min(worksheet.rowCount, 100); i++) {
+        const row = worksheet.getRow(i);
+        let matchCount = 0;
+        const seenKeywords = new Set<string>();
+        row.eachCell({ includeEmpty: false }, (cell) => {
+          const val = String(cell.value || '').toLowerCase();
+          keywords.forEach(kw => {
+            if (val.includes(kw) && !seenKeywords.has(kw)) {
+              matchCount++;
+              seenKeywords.add(kw);
+            }
+          });
+        });
+        if (matchCount >= 2) {
+          headerRowIndex = i;
+          break;
+        }
+      }
+
+      // Attempt 2: If failed, take the first row that has at least 1 keyword and multiple columns
+      if (headerRowIndex === 1) {
+        for (let i = 1; i <= Math.min(worksheet.rowCount, 50); i++) {
+          const row = worksheet.getRow(i);
+          let cellCount = 0;
+          row.eachCell({ includeEmpty: false }, () => cellCount++);
+          if (cellCount >= 3 && row.values && Array.isArray(row.values) && row.values.some(v => keywords.some(kw => String(v || '').toLowerCase().includes(kw)))) {
+            headerRowIndex = i;
+            break;
+          }
+        }
+      }
+
+      const hRow = worksheet.getRow(headerRowIndex);
+      hRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        excelHeaders[colNumber] = String(cell.value || '').trim();
+      });
+      worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+        if (rowNumber <= headerRowIndex) return;
+        const obj: any = {};
+        row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+          const h = excelHeaders[colNumber];
+          if (h) obj[h] = cell.value;
+        });
+        krcRowsRaw.push(obj);
+      });
+    });
+  } else {
+    const buffer = await krcFile.arrayBuffer();
+    
+    // Try multiple encodings for Russian CSVs
+    const encodings = ['utf-8', 'windows-1251', 'iso-8859-5', 'utf-16le'];
+    let text = '';
+    let krcRowsRawCsv: any[] = [];
+
+    for (const encoding of encodings) {
+      try {
+        const decoder = new TextDecoder(encoding);
+        const decodedText = decoder.decode(buffer);
+        
+        const detectSeparator = (t: string): string => {
+          const sample = t.slice(0, 10000);
+          const semiCount = (sample.match(/;/g) || []).length;
+          const commaCount = (sample.match(/,/g) || []).length;
+          const tabCount = (sample.match(/\t/g) || []).length;
+          if (tabCount > semiCount && tabCount > commaCount) return '\t';
+          return semiCount >= commaCount ? ';' : ',';
+        };
+
+        const sep = detectSeparator(decodedText);
+        const firstPass = Papa.parse(decodedText, { delimiter: sep, header: false, skipEmptyLines: true });
+        const rows = firstPass.data as any[][];
+        
+        let headerIdx = -1;
+        // Attempt 1: Strict match (2+ unique keywords)
+        for (let i = 0; i < Math.min(rows.length, 100); i++) {
+          let matches = 0;
+          const seenKw = new Set<string>();
+          rows[i].forEach(cell => {
+            const val = String(cell || '').toLowerCase();
+            keywords.forEach(kw => {
+              if (val.includes(kw) && !seenKw.has(kw)) {
+                matches++;
+                seenKw.add(kw);
+              }
+            });
+          });
+          if (matches >= 2) {
+            headerIdx = i;
+            break;
+          }
+        }
+
+        // Attempt 2: Loose match (1 keyword + multiple cells)
+        if (headerIdx === -1) {
+          for (let i = 0; i < Math.min(rows.length, 50); i++) {
+            const row = rows[i];
+            if (row.length >= 3 && row.some(cell => keywords.some(kw => String(cell || '').toLowerCase().includes(kw)))) {
+              headerIdx = i;
+              break;
+            }
+          }
+        }
+
+        if (headerIdx !== -1) {
+          const headerRow = rows[headerIdx].map(h => String(h || '').trim());
+          const dataRows = rows.slice(headerIdx + 1);
+          krcRowsRawCsv = dataRows.map(row => {
+            const obj: any = {};
+            headerRow.forEach((h, idx) => {
+              if (h) obj[h] = row[idx];
+            });
+            return obj;
+          });
+          text = decodedText;
+          krcRowsRaw = krcRowsRawCsv;
+          break; // Found valid data with this encoding
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+  }
+
+  const findKey = (obj: any, target: string[]) => {
+    if (!obj) return undefined;
+    const keys = Object.keys(obj);
+    const targets = target.map(t => t.toLowerCase().trim());
+    
+    // 1. Exact or strict match
+    let found = keys.find(k => {
+      const kl = k.toLowerCase().trim();
+      return targets.includes(kl);
+    });
+    if (found) return found;
+
+    // 2. Inclusion with priority to shortest key to avoid over-matching
+    const candidates = keys.filter(k => {
+      const kl = k.toLowerCase().trim();
+      return targets.some(t => kl.includes(t));
+    }).sort((a, b) => a.length - b.length);
+    
+    return candidates[0];
+  };
+
+  const parseDate = (dStr: any, tStr: any = ''): Date | null => {
+    if (!dStr) return null;
+    let y: number, m: number, d: number;
+    let h = 0, min = 0, sec = 0;
+
+    if (dStr instanceof Date) {
+      y = dStr.getFullYear(); m = dStr.getMonth(); d = dStr.getDate();
+    } else if (typeof dStr === 'number') {
+      const date = new Date(Math.round((dStr - 25569) * 86400 * 1000));
+      y = date.getFullYear(); m = date.getMonth(); d = date.getDate();
+    } else {
+      let cleanD = String(dStr).trim();
+      // Handle "01/03/2026 08:18 - 01/03/2026 09:15" with flexible spacing
+      const rangeParts = cleanD.split(/\s*-\s*/);
+      const firstPart = rangeParts[0];
+      
+      const nums = firstPart.split(/[^0-9]+/).filter(Boolean).map(Number);
+      if (nums.length >= 3) {
+        if (nums[0] > 1000) { y = nums[0]; m = nums[1]-1; d = nums[2]; }
+        else if (nums[2] > 1000) { d = nums[0]; m = nums[1]-1; y = nums[2]; }
+        else { d = nums[0]; m = nums[1]-1; y = 2000 + nums[2]; }
+        // If time is embedded in the date string (like "01.03.2026 14:30")
+        if (!tStr && nums.length >= 5) { h = nums[3]; min = nums[4]; sec = nums[5] || 0; }
+      } else return null;
+    }
+
+    if (tStr) {
+      if (tStr instanceof Date) { h = tStr.getHours(); min = tStr.getMinutes(); sec = tStr.getSeconds(); }
+      else if (typeof tStr === 'number') {
+        const ts = Math.round(tStr * 86400);
+        h = Math.floor(ts / 3600); min = Math.floor((ts % 3600) / 60); sec = ts % 60;
+      } else {
+        const tNums = String(tStr).split(/[^0-9]+/).filter(Boolean).map(Number);
+        if (tNums.length >= 2) {
+          if (tNums.length >= 5) { h = tNums[3]; min = tNums[4]; sec = tNums[5] || 0; }
+          else { h = tNums[0]; min = tNums[1]; sec = tNums[2] || 0; }
+        }
+      }
+    }
+    const resValue = new Date(y!, m!, d!, h, min, sec);
+    return isNaN(resValue.getTime()) ? null : resValue;
+  };
+
+  let lastValidDateSource: any = null;
+  let lastValidRoute: string = '';
+  let lastValidConductor: string = '';
+
+  for (const row of krcRowsRaw) {
+    const kRoute = findKey(row, ['№ марш.', '№ маршрута', 'Route', 'маршрут', 'марш.', 'маршруты', '№марш.', 'маршрут №', 'номер маршрута', 'тс']);
+    const kConductor = findKey(row, ['ФИО кондуктора', 'Conductor', 'фио', 'наименование', 'фио водителя', 'водитель', 'DRIVER', 'ф.и.о.', 'кондуктор', 'фио контролера', 'контролер', 'экспедитор', 'сотрудник', 'ФИО водителя']);
+    const kTime = findKey(row, ['Время', 'CR_TIME', 'время', 'чч:мм', 'check time', 'время пров.', 'время_пров', 'время проверки', 'время начала проверки', 'время события']);
+    const kDate = findKey(row, ['Дата', 'Date', 'дата', 'Время работы', 'Период', 'смена', 'сутки', 'транспортные сутки', 'дата проверки', 'дата события']);
+
+    const routeRaw = kRoute ? String(row[kRoute] || '').trim() : '';
+    const conductorRaw = kConductor ? String(row[kConductor] || '').trim() : '';
+    const timeVal = kTime ? row[kTime] : '';
+    const dateVal = kDate ? row[kDate] : '';
+    
+    if (routeRaw) lastValidRoute = routeRaw;
+    if (conductorRaw) lastValidConductor = conductorRaw;
+    
+    if (dateVal !== undefined && dateVal !== null && dateVal !== '') {
+      lastValidDateSource = dateVal;
+    }
+    
+    const datetime = parseDate(dateVal || lastValidDateSource, timeVal);
+    if (!datetime) continue;
+    
+    let displayTime = '';
+    if (timeVal instanceof Date) displayTime = timeVal.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    else if (typeof timeVal === 'number') {
+      const ts = Math.round(timeVal * 86400);
+      displayTime = `${String(Math.floor(ts/3600)).padStart(2,'0')}:${String(Math.floor((ts%3600)/60)).padStart(2,'0')}`;
+    } else {
+      const tS = String(timeVal || '').trim();
+      const tMatch = tS.match(/(\d{1,2}:\d{1,2})/);
+      displayTime = tMatch ? tMatch[1] : tS;
+    }
+
+    if (lastValidRoute || lastValidConductor) {
+      krcData.push({ 
+        route: lastValidRoute, 
+        conductor: lastValidConductor, 
+        time: displayTime, 
+        datetime 
+      });
+    }
+  }
+  return krcData;
+}
+
 export async function reconcileFiles(
   prilFile: File, 
   transFile: File, 
   tripDurationMinutes: number = 120,
-  krcFile?: File | null
+  krcFile?: File | null,
+  forwardMileage: number = 0,
+  returnMileage: number = 0
 ): Promise<ReconciliationResponse> {
   const findKey = (obj: any, target: string | string[], excludes: string[] = []) => {
     if (!obj) return undefined;
@@ -300,10 +570,10 @@ export async function reconcileFiles(
   const conductorNamesMatch = (nameA: string, nameB: string): boolean => {
     if (!nameA || !nameB) return false;
     
-    const normalize = (n: string) => n.toLowerCase()
+    const normalize = (n: string) => normalizeHomoglyphs(n.toLowerCase())
       .replace(/ё/g, 'е')
       .replace(/^(кондуктор|водитель|кассир|контролер)\s+/gi, '')
-      .replace(/[^a-zа-я\s]/gi, ' ')
+      .replace(/[^a-zа-яё\s]/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -318,24 +588,22 @@ export async function reconcileFiles(
     const partsB = normB.split(/\s+/).filter(p => p.length >= 2);
     
     if (partsA.length === 0 || partsB.length === 0) {
-       // If one side has only initials/one word, do a simple inclusion check
        return normA.includes(normB) || normB.includes(normA);
     }
 
-    // Check if the primary name (usually the longest or first part) exists in both
-    // Order-agnostic check: "Farentseva O.V." vs "O.V. Farentseva"
-    const hasSharedSignificantPart = partsA.some(pa => partsB.some(pb => pa === pb && pa.length >= 4));
+    const hasSharedSignificantPart = partsA.some(pa => partsB.some(pb => pa === pb && pa.length >= 3));
     if (!hasSharedSignificantPart) return false;
 
-    // initials check
-    const isInitial = (s: string) => s.length === 1 || (s.length === 2 && s.endsWith('.'));
-    const getInitials = (s: string) => s.split(/\s+/).filter(isInitial).map(i => i.replace('.', ''));
+    const isInitial = (s: string) => s.length === 1;
+    const getInitials = (s: string) => s.split(/\s+/).filter(isInitial);
     
     const iA = getInitials(normA);
     const iB = getInitials(normB);
     
+    // If both have initials, they must share at least one
     if (iA.length > 0 && iB.length > 0) {
-      return iA.some(a => iB.includes(a));
+      const match = iA.some(a => iB.includes(a));
+      if (!match) return false;
     }
     
     return true; 
@@ -343,24 +611,25 @@ export async function reconcileFiles(
 
   const normalizeName = (name: string): string => {
     if (!name) return "";
-    return name.toLowerCase()
-      .replace(/ё/g, 'е') // Normalize yo/e
-      .replace(/[^a-zа-я\s]/gi, '') // Keep only letters and spaces
+    return normalizeHomoglyphs(name.toLowerCase())
+      .replace(/ё/g, 'е')
+      .replace(/[^a-zа-яё\s]/gi, '')
       .replace(/\s+/g, ' ')
       .trim();
   };
 
   const normalizeRoute = (r: string): string => {
     if (!r) return '';
-    // Remove "маршрут", "№", "route", "номер" and dots/spaces
-    return String(r)
+    // Strip everything except alphanumeric, convert homoglyphs, and remove leading zeros
+    const str = normalizeHomoglyphs(String(r).toLowerCase())
       .replace(/Маршрут\s*№?/gi, '')
       .replace(/маршрут/gi, '')
       .replace(/route/gi, '')
       .replace(/№/g, '')
-      .replace(/[^0-9a-zа-я]/gi, '')
-      .trim()
-      .toLowerCase();
+      .replace(/[^0-9a-zа-яё]/gi, '')
+      .trim();
+    // Remove leading zeros for routes like "036" vs "36"
+    return str.replace(/^0+/, '');
   };
 
   const prilText = await readFileAsText(prilFile);
@@ -368,94 +637,7 @@ export async function reconcileFiles(
   
   let krcData: KrcRow[] = [];
   if (krcFile) {
-    const isExcel = krcFile.name.toLowerCase().endsWith('.xlsx');
-    let krcRowsRaw: any[] = [];
-
-    if (isExcel) {
-      const workbook = new ExcelJS.Workbook();
-      const arrayBuffer = await krcFile.arrayBuffer();
-      await workbook.xlsx.load(arrayBuffer);
-      const worksheet = workbook.getWorksheet(1);
-      
-      if (worksheet) {
-        let excelHeaders: string[] = [];
-        let headerRowIndex = 1;
-        
-        // Find header row by keywords
-        const keywords = ['дата', 'маршрут', 'грз', 'время', 'рейс', 'кондуктор', 'провод', 'марш', 'ффио'];
-        for (let i = 1; i <= Math.min(worksheet.rowCount, 20); i++) {
-          const row = worksheet.getRow(i);
-          let matchCount = 0;
-          row.eachCell({ includeEmpty: false }, (cell) => {
-            const val = String(cell.value || '').toLowerCase();
-            if (keywords.some(kw => val.includes(kw))) matchCount++;
-          });
-          if (matchCount > 2) {
-            headerRowIndex = i;
-            break;
-          }
-        }
-        
-        const hRow = worksheet.getRow(headerRowIndex);
-        hRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-          excelHeaders[colNumber] = String(cell.value || '').trim();
-        });
-        
-        worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
-          if (rowNumber <= headerRowIndex) return;
-          const obj: any = {};
-          row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-            const h = excelHeaders[colNumber];
-            if (h) obj[h] = cell.value;
-          });
-          krcRowsRaw.push(obj);
-        });
-      }
-    } else {
-      const krcText = await readFileAsText(krcFile);
-      const krcSep = detectSeparator(krcText);
-      krcRowsRaw = await parseCsvLocal(krcText, krcSep);
-    }
-    
-    let lastValidDateStr = "";
-    for (const row of krcRowsRaw) {
-      const kRoute = findKey(row, ['№ марш.', '№ маршрута', 'Route', 'маршрут', 'марш.']);
-      const kConductor = findKey(row, ['ФИО кондуктора', 'Conductor', 'фио', 'наименование', 'фио водителя', 'водитель']);
-      // Specifically look for the check time, avoiding the work interval
-      const kTime = findKey(row, ['Время', 'CR_TIME', 'время', 'чч:мм']);
-      // Date can be in 'Дата' or extracted from 'Время работы'
-      const kDate = findKey(row, ['Дата', 'Date', 'дата', 'Время работы', 'Период']);
-
-      const route = kRoute ? String(row[kRoute] || '').trim() : '';
-      const conductor = kConductor ? String(row[kConductor] || '').trim() : '';
-      const timeVal = kTime ? row[kTime] : '';
-      const dateVal = kDate ? row[kDate] : '';
-      
-      const dateStr = String(dateVal || '').trim();
-      if (dateStr && dateStr.length > 5) lastValidDateStr = dateStr;
-      
-      // Use the specific check time for the datetime
-      const datetime = parseDate(dateVal || lastValidDateStr, timeVal);
-      
-      // Format time string for display in the status
-      let displayTime = '';
-      if (timeVal instanceof Date) {
-        displayTime = timeVal.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-      } else if (typeof timeVal === 'number') {
-        const totalSec = Math.round(timeVal * 86400);
-        const hh = Math.floor(totalSec / 3600);
-        const mm = Math.floor((totalSec % 3600) / 60);
-        displayTime = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-      } else {
-        const tS = String(timeVal || '').trim();
-        const tMatch = tS.match(/(\d{1,2}:\d{1,2})/);
-        displayTime = tMatch ? tMatch[1] : tS;
-      }
-
-      if (route || conductor) {
-        krcData.push({ route, conductor, time: displayTime, datetime });
-      }
-    }
+    krcData = await parseKrcFile(krcFile);
   }
 
   const prilSep = detectSeparator(prilText);
@@ -477,18 +659,20 @@ export async function reconcileFiles(
   ];
 
   for (const row of prilRowsRaw) {
-    const kDate = findKey(row, ['Транспортные сутки', 'Дата', 'Date', 'Day']);
-    const kRoute = findKey(row, ['№ маршрута', 'Маршрут', 'Route', 'Route Num', 'Маршрут №']);
-    const kTime = findKey(row, ['Фактическое время начала рейса', 'Время начала', 'Start Time', 'Время']);
-    const kGrz = findKey(row, ['ГРЗ', 'Госномер', 'VREG_NUM', 'Vehicle', 'Гос. номер']);
-    const kWork = findKey(row, ['Фактическая транспортная работа', 'Пробег', 'Mileage', 'Работа', 'км']);
+    const kDate = findKey(row, ['Транспортные сутки', 'Дата', 'Date', 'Day', 'Операционные сутки', 'Сутки']);
+    const kRoute = findKey(row, ['№ маршрута', 'Маршрут', 'Route', 'Route Num', 'Маршрут №', '№марш.']);
+    const kTime = findKey(row, ['Фактическое время начала рейса', 'Время начала', 'Start Time', 'Время', 'Время выезда', 'Начало рейса', 'Начало']);
+    const kGrz = findKey(row, ['ГРЗ', 'Госномер', 'VREG_NUM', 'Vehicle', 'Гос. номер', 'Гос-номер']);
+    const kWork = findKey(row, ['Фактическая транспортная работа', 'Пробег', 'Mileage', 'Работа', 'км', 'Расстояние']);
     const kDirection = findKey(row, ['Направление', 'Direction', 'Код направления', 'Прям/Обр']);
+    const kConductor = findKey(row, ['ФИО кондуктора', 'Водитель', 'Conductor', 'Driver', 'ФИО', 'ФИО водителя', 'Ф.И.О.', 'Кондуктор']);
 
     const dateStr = (kDate ? row[kDate] : '').trim();
     const route = (kRoute ? row[kRoute] : '').trim();
     const startTimeStr = (kTime ? row[kTime] : '').trim();
     const grzRaw = (kGrz ? row[kGrz] : '').trim();
     const direction = (kDirection ? row[kDirection] : '').trim();
+    const conductor = (kConductor ? row[kConductor] : '').trim();
     let actualWorkKm = parseFloat(String((kWork ? row[kWork] : '0')).replace(',', '.'));
     if (isNaN(actualWorkKm)) actualWorkKm = 0;
 
@@ -542,7 +726,7 @@ export async function reconcileFiles(
       }
     }
 
-    if (dateStr || route || grzRaw) {
+    if (dateStr || route || grzRaw || conductor) {
       prilData.push({
         date_str: dateStr,
         route: route,
@@ -551,6 +735,7 @@ export async function reconcileFiles(
         grz_norm: normalizeGrz(grzRaw),
         actual_work_km: actualWorkKm,
         direction: direction,
+        conductor: conductor,
         start_datetime: startDatetime
       });
     }
@@ -564,7 +749,7 @@ export async function reconcileFiles(
     const kTrip = findKey(row, ['TRIP_NO', 'Рейс', 'Trip']);
     const kCrTime = findKey(row, ['CR_TIME', 'Время закрытия', 'Close Time']);
     const kInName = findKey(row, ['IN_NAME', 'Остановка', 'Stop Name']);
-    const kConductor = findKey(row, ['CONDUCTOR', 'Кондуктор', 'ФИО кондуктора']);
+    const kConductor = findKey(row, ['CONDUCTOR', 'Кондуктор', 'ФИО кондуктора', 'Водитель', 'DRIVER', 'ФИО']);
 
     const date = (kDate ? row[kDate] : '').trim();
     const time = (kTime ? row[kTime] : '').trim();
@@ -718,66 +903,70 @@ export async function reconcileFiles(
     const conductors = confirmedTransactions.length > 0 
       ? Array.from(new Set(confirmedTransactions.map(t => t.CONDUCTOR).filter(Boolean)))
       : [];
+    
+    const conductorsToMatch = Array.from(new Set([
+      ...conductors, 
+      ...(flight.conductor ? [flight.conductor] : [])
+    ])).filter(Boolean);
 
     // KRC Matching Logic
     let krcStatus = krcFile ? "Проверка не проводилась" : "";
-    if (krcFile && confirmedTransactions.length > 0) {
+    if (krcFile) {
       const flightRoute = normalizeRoute(flight.route);
-      const transactionRoutes = Array.from(new Set(confirmedTransactions.map(t => normalizeRoute(t.ROUTE_NUM)).filter(Boolean)));
+      const transactionRoutes = confirmedTransactions.length > 0 
+        ? Array.from(new Set(confirmedTransactions.map(t => normalizeRoute(t.ROUTE_NUM)).filter(Boolean)))
+        : [];
       
-      const tranStart = confirmedTransactions[0].tran_datetime;
-      const tranEnd = confirmedTransactions[confirmedTransactions.length - 1].tran_datetime;
-      const scheduledStart = parseDate(flight.date_str, flight.start_time_str);
-      
-      if (tranStart && tranEnd) {
+      if (flight.start_datetime || confirmedTransactions.length > 0) {
+        const tranDates = confirmedTransactions.map(t => t.tran_datetime).filter((d): d is Date => d !== null).sort((a, b) => a.getTime() - b.getTime());
+        const tranStart = tranDates.length > 0 ? tranDates[0] : (flight.start_datetime || new Date());
+        const tranEnd = tranDates.length > 0 ? tranDates[tranDates.length - 1] : new Date(tranStart.getTime() + tripDurationMinutes * 60000);
+        
+        // Find matching KRC check by 4 mandatory criteria: Date, Time, Route, Conductor (FIO)
         const matchingKrc = krcData.find(k => {
-          // 1. Route Match
-          const kRoute = normalizeRoute(k.route);
-          if (kRoute) {
-            const kRouteDigits = kRoute.replace(/[^0-9]/g, '');
-            const fRouteDigits = flightRoute ? flightRoute.replace(/[^0-9]/g, '') : '';
-            
-            const isRouteMatch = 
-              (flightRoute && (kRoute === flightRoute || (kRouteDigits && kRouteDigits === fRouteDigits))) ||
-              transactionRoutes.some(tr => kRoute === tr || (kRouteDigits && kRouteDigits === tr.replace(/[^0-9]/g, '')));
-              
-            if (!isRouteMatch) return false;
-          }
-
-          // 2. Conductor/Driver Match
-          const conductorMatch = conductors.some(c => conductorNamesMatch(k.conductor, c));
+          if (!k.datetime) return false;
+          
+          // 1. CONDUCTOR (FIO) - MUST MATCH
+          const conductorMatch = conductorsToMatch.some(c => conductorNamesMatch(k.conductor, c));
           if (!conductorMatch) return false;
 
-          // 3. Date & Time matching
-          if (k.datetime) {
-            const isSameDayStart = k.datetime.getFullYear() === tranStart.getFullYear() &&
-                                  k.datetime.getMonth() === tranStart.getMonth() &&
-                                  k.datetime.getDate() === tranStart.getDate();
-            
-            const isSameDayEnd = k.datetime.getFullYear() === tranEnd.getFullYear() &&
-                                k.datetime.getMonth() === tranEnd.getMonth() &&
-                                k.datetime.getDate() === tranEnd.getDate();
+          // 2. ROUTE - MUST MATCH
+          const kRoute = normalizeRoute(k.route);
+          // If KRC row has a route, it must match either the flight route or any route from transactions
+          // Special case: if kRoute is empty in KRC row but conductor matches and it's same trip, we might consider it a match
+          // but user asked for route matching, so we enforce it if present.
+          const isRouteMatch = (!kRoute) || 
+                            (flightRoute && (kRoute === flightRoute || flightRoute.includes(kRoute) || kRoute.includes(flightRoute))) ||
+                            transactionRoutes.some(tr => kRoute === tr || tr.includes(kRoute) || kRoute.includes(tr));
+          if (!isRouteMatch) return false;
 
-            if (!isSameDayStart && !isSameDayEnd) return false;
-
-            const checkTime = k.datetime.getTime();
-            const startT = tranStart.getTime();
-            const endT = tranEnd.getTime();
-            
-            // "попадает в диапазон транзакций"
-            // With a small buffer of 15 mins to be safe
-            const buffer = 15 * 60000; 
-
-            if (checkTime >= (startT - buffer) && checkTime <= (endT + buffer)) {
-              console.log(`Matched KRC: ${k.conductor} on route ${k.route} at ${k.datetime.toLocaleString()}. Range: ${tranStart.toLocaleTimeString()} - ${tranEnd.toLocaleTimeString()}`);
-              return true;
+          // 3. DATE - MUST MATCH
+          const referenceDate = flight.start_datetime || tranStart;
+          const isSameDay = k.datetime.getFullYear() === referenceDate.getFullYear() &&
+                            k.datetime.getMonth() === referenceDate.getMonth() &&
+                            k.datetime.getDate() === referenceDate.getDate();
+          
+          const kTime = k.datetime.getTime();
+          const fTime = referenceDate.getTime();
+          
+          // Range check for same day: must fall exactly within transaction range
+          if (isSameDay) {
+            if (tranDates.length > 0) {
+              const windowStart = tranStart.getTime(); 
+              const windowEnd = tranEnd.getTime();
+              return kTime >= windowStart && kTime <= windowEnd;
             }
+            return false; // No transactions = no range to fall into
           }
-          return false;
+
+          // Fallback for overnight shifts: if no transaction range yet, match very tight buffer around flight start
+          const withinTimeBuffer = Math.abs(kTime - fTime) < 30 * 60000; 
+
+          return withinTimeBuffer;
         });
 
         if (matchingKrc) {
-          krcStatus = `Проверка проводилась, время ${matchingKrc.time}`;
+          krcStatus = `Проверка проводилась, время проверки: ${matchingKrc.time}`;
           krcCheckCount++;
         }
       }
@@ -793,19 +982,17 @@ export async function reconcileFiles(
       mileage: isConfirmed ? flight.actual_work_km : 0,
       direction: finalDirection,
       transCount: confirmedTransactions.length,
-      conductor: conductors.length > 0 ? (() => {
-        const full = conductors[0];
-        const parts = full.split(/\s+/).filter(Boolean);
-        if (parts.length >= 2) {
-          const surname = parts[0].charAt(0).toUpperCase() + parts[0].slice(1).toLowerCase();
-          const initials = parts.slice(1).map(p => p.charAt(0).toUpperCase() + '.').join('');
-          return `${surname} ${initials}`;
-        }
-        return full;
+      conductor: conductorsToMatch.length > 0 ? (() => {
+        const full = conductorsToMatch[0];
+        return full.split(/\s+/)
+          .filter(Boolean)
+          .map(part => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+          .join(' ');
       })() : "",
       openTimes: confirmedTransactions.map(t => t.TIME).join('; '),
       closeTimes: confirmedTransactions.map(t => t.CR_TIME).join('; '),
-      krcStatus: krcStatus
+      krcStatus: krcStatus,
+      plannedMileage: finalDirection === "Прямое" ? forwardMileage : (finalDirection === "Обратное" ? returnMileage : 0)
     });
   }
 
@@ -825,6 +1012,277 @@ export async function reconcileFiles(
   };
 }
 
+export async function parseExcelReport(file: File): Promise<ReconciliationResult[]> {
+  const workbook = new ExcelJS.Workbook();
+  const arrayBuffer = await file.arrayBuffer();
+  await workbook.xlsx.load(arrayBuffer);
+  const worksheet = workbook.getWorksheet('Отчет') || workbook.getWorksheet(1);
+  if (!worksheet) return [];
+
+  const results: ReconciliationResult[] = [];
+  const headers: string[] = [];
+  const headerRow = worksheet.getRow(1);
+  headerRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+    headers[colNumber] = String(cell.value || '').trim();
+  });
+
+  const findCol = (targets: string[]) => {
+    const idx = headers.findIndex(h => h && targets.some(t => h.toLowerCase().includes(t.toLowerCase())));
+    return idx !== -1 ? idx : -1;
+  };
+
+  const colMap = {
+    date: findCol(['Дата']),
+    route: findCol(['Маршрут']),
+    startTime: findCol(['Время начала']),
+    grz: findCol(['ГРЗ']),
+    status: findCol(['Статус']),
+    tripNo: findCol(['Номер рейса', '№']),
+    mileage: findCol(['Пробег', 'км']),
+    direction: findCol(['Направление']),
+    transCount: findCol(['Кол-во транзакций', 'Транз']),
+    conductor: findCol(['Водитель', 'ФИО']),
+    openTimes: findCol(['Время открытия']),
+    closeTimes: findCol(['Время закрытия']),
+    krcStatus: findCol(['Проверка КРС', 'KRC'])
+  };
+
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const dateVal = colMap.date !== -1 ? row.getCell(colMap.date).text : '';
+    if (dateVal === 'Итого' || !dateVal) return;
+
+    results.push({
+      date: dateVal,
+      route: colMap.route !== -1 ? row.getCell(colMap.route).text : '',
+      startTime: colMap.startTime !== -1 ? row.getCell(colMap.startTime).text : '',
+      grz: colMap.grz !== -1 ? row.getCell(colMap.grz).text : '',
+      status: colMap.status !== -1 ? row.getCell(colMap.status).text : '',
+      tripNo: colMap.tripNo !== -1 ? row.getCell(colMap.tripNo).text : '',
+      mileage: colMap.mileage !== -1 ? parseFloat(row.getCell(colMap.mileage).text.replace(',', '.')) || 0 : 0,
+      direction: colMap.direction !== -1 ? row.getCell(colMap.direction).text : '',
+      transCount: colMap.transCount !== -1 ? parseInt(row.getCell(colMap.transCount).text) || 0 : 0,
+      conductor: colMap.conductor !== -1 ? row.getCell(colMap.conductor).text : '',
+      openTimes: colMap.openTimes !== -1 ? row.getCell(colMap.openTimes).text : '',
+      closeTimes: colMap.closeTimes !== -1 ? row.getCell(colMap.closeTimes).text : '',
+      krcStatus: colMap.krcStatus !== -1 ? row.getCell(colMap.krcStatus).text : ''
+    });
+  });
+
+  return results;
+}
+
+export async function enrichReportWithKrc(reportResults: ReconciliationResult[], krcData: KrcRow[]): Promise<ReconciliationResult[]> {
+  const tripDurationMinutes = 120;
+  
+  const normalizeRoute = (r: string) => {
+    if (!r) return "";
+    // Remove all non-alphanumeric chars for a common denominator, but keep numbers
+    // Actually, just remove leading zeros and prefixes like "м", "а", "№" to compare numeric parts
+    return String(r).replace(/^(м|а|№|маршрут|марш|r)\s*/i, '').replace(/^0+/, '').trim().toLowerCase();
+  };
+
+  const normalizeHomoglyphs = (text: string): string => {
+    if (!text) return "";
+    const map: Record<string, string> = {
+      'A': 'А', 'B': 'В', 'C': 'С', 'E': 'Е', 'H': 'Н', 'K': 'К', 
+      'M': 'М', 'O': 'О', 'P': 'Р', 'T': 'Т', 'X': 'Х', 'y': 'у', 'Y': 'У',
+      'a': 'а', 'b': 'в', 'c': 'с', 'e': 'е', 'h': 'н', 'k': 'к',
+      'm': 'м', 'o': 'о', 'p': 'р', 't': 'т', 'x': 'х'
+    };
+    return text.split('').map(char => map[char] || char).join('');
+  };
+
+  const conductorNamesMatch = (nameA: string, nameB: string): boolean => {
+    if (!nameA || !nameB) return false;
+    const normalize = (n: string) => normalizeHomoglyphs(n.toLowerCase())
+      .replace(/ё/g, 'е')
+      .replace(/^(кондуктор|водитель|кассир|контролер)\s+/gi, '')
+      .replace(/[^a-zа-яё\s]/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const normA = normalize(nameA);
+    const normB = normalize(nameB);
+    if (!normA || !normB) return false;
+    
+    // Direct match or one contains the other
+    if (normA === normB || normA.includes(normB) || normB.includes(normA)) return true;
+    
+    const partsA = normA.split(/\s+/).filter(p => p.length >= 2);
+    const partsB = normB.split(/\s+/).filter(p => p.length >= 2);
+    
+    // Check if the surname (usually the first part) matches exactly
+    if (partsA[0] === partsB[0]) return true;
+
+    const hasSharedSignificantPart = partsA.some(pa => partsB.some(pb => pa === pb && pa.length >= 3));
+    if (hasSharedSignificantPart) return true;
+
+    return false;
+  };
+
+  return reportResults.map(res => {
+    const flightRoute = normalizeRoute(res.route);
+    const conductor = res.conductor;
+    
+    // Parse start time
+    const [h, m] = res.startTime.split(':').map(Number);
+    // Support multiple date formats (DD.MM.YYYY, DD/MM/YYYY, YYYY-MM-DD, etc.)
+    const dateNums = res.date.split(/[^0-9]+/).filter(Boolean).map(Number);
+    let d, mon, y;
+    if (dateNums.length >= 3) {
+      if (dateNums[0] > 1000) { y = dateNums[0]; mon = dateNums[1]; d = dateNums[2]; }
+      else if (dateNums[2] > 1000) { d = dateNums[0]; mon = dateNums[1]; y = dateNums[2]; }
+      else { d = dateNums[0]; mon = dateNums[1]; y = 2000 + dateNums[2]; }
+    } else {
+      // Fallback
+      return res;
+    }
+    const startDatetime = new Date(y, mon - 1, d, h, m);
+    
+    // Parse transaction times for window estimation from openTimes (Время открытия транзакции)
+    const openTimesList = res.openTimes.split(';').map(t => t.trim()).filter(Boolean);
+    
+    const parseClock = (clock: string) => {
+      const parts = clock.split(':').map(Number);
+      const th = parts[0] || 0;
+      const tm = parts[1] || 0;
+      const ts = parts[2] || 0;
+      return new Date(y, mon - 1, d, th, tm, ts);
+    };
+
+    let tranStart: Date | null = null;
+    let tranEnd: Date | null = null;
+
+    if (openTimesList.length > 0) {
+      const times = openTimesList.map(t => parseClock(t)).sort((a, b) => a.getTime() - b.getTime());
+      tranStart = times[0];
+      tranEnd = times[times.length - 1];
+    } else {
+      // Fallback if no transactions are recorded
+      tranStart = startDatetime;
+      tranEnd = new Date(startDatetime.getTime() + tripDurationMinutes * 60000);
+    }
+
+    const matchingKrc = krcData.find(k => {
+      if (!k.datetime) return false;
+      
+      // 1. Date Match
+      const isSameDay = k.datetime.getFullYear() === startDatetime.getFullYear() &&
+                        k.datetime.getMonth() === startDatetime.getMonth() &&
+                        k.datetime.getDate() === startDatetime.getDate();
+      if (!isSameDay) return false;
+
+      // 2. Route Match - relaxed logic
+      const kRoute = normalizeRoute(k.route);
+      const isRouteMatch = (!kRoute) || 
+                          (flightRoute && (kRoute === flightRoute || flightRoute.includes(kRoute) || kRoute.includes(flightRoute)));
+      if (!isRouteMatch) return false;
+      
+      // 3. FIO Match (Driver/Conductor Name)
+      if (!conductorNamesMatch(k.conductor, conductor)) return false;
+
+      // 4. Time Range Match - Must fall exactly into transaction range
+      const kTime = k.datetime.getTime();
+      
+      if (openTimesList.length > 0 && tranStart && tranEnd) {
+        const windowStart = tranStart.getTime();
+        const windowEnd = tranEnd.getTime();
+        return kTime >= windowStart && kTime <= windowEnd;
+      }
+      
+      return false; // Exactly in range implies range must exist via transactions
+    });
+
+    return {
+      ...res,
+      krcStatus: matchingKrc ? `Проверка проводилась, время проверки: ${matchingKrc.time}` : 'Проверка не проводилась'
+    };
+  });
+}
+
+export async function parseCsvReport(file: File): Promise<ReconciliationResult[]> {
+  const text = await readFileAsText(file);
+  
+  // Custom separator detection for CSV reports
+  const detectSeparator = (t: string): string => {
+    const sample = t.slice(0, 5000);
+    const semiCount = (sample.match(/;/g) || []).length;
+    const commaCount = (sample.match(/,/g) || []).length;
+    const tabCount = (sample.match(/\t/g) || []).length;
+    if (tabCount > semiCount && tabCount > commaCount) return '\t';
+    return semiCount >= commaCount ? ';' : ',';
+  };
+
+  const sep = detectSeparator(text);
+  const parseResult = Papa.parse(text, { 
+    delimiter: sep,
+    header: true, 
+    skipEmptyLines: true 
+  });
+  const rows = parseResult.data as any[];
+
+  return rows.filter(row => row['Дата'] && row['Дата'] !== 'Итого').map(row => ({
+    date: row['Дата'] || '',
+    route: row['Маршрут'] || '',
+    startTime: row['Время начала (Отчет)'] || row['Время начала'] || '',
+    grz: row['ГРЗ'] || '',
+    status: row['Статус подтверждения'] || row['Статус'] || '',
+    tripNo: row['Номер рейса'] || '',
+    mileage: parseFloat(String(row['Фактическая транспортная работа (км)'] || row['Пробег'] || '0').replace(',', '.')) || 0,
+    direction: row['Направление'] || '',
+    transCount: parseInt(String(row['Кол-во транзакций'] || '0')) || 0,
+    conductor: row['ФИО водителя'] || row['Водитель'] || '',
+    openTimes: row['Время открытия транзакции'] || row['Время открытия'] || '',
+    closeTimes: row['Время закрытия транзакции'] || row['Время закрытия'] || '',
+    krcStatus: row['Проверка КРС'] || row['KRC'] || ''
+  }));
+}
+
+export async function generateCsv(results: ReconciliationResult[]): Promise<Blob> {
+  const csvData = results.filter(res => res.date && res.grz && res.startTime).map(res => ({
+    'Дата': res.date,
+    'Маршрут': res.route,
+    'Время начала (Отчет)': res.startTime,
+    'ГРЗ': res.grz,
+    'ФИО водителя': res.conductor,
+    'Статус подтверждения': res.status,
+    'Номер рейса': res.tripNo,
+    'Фактическая транспортная работа (км)': String(res.mileage.toFixed(2)).replace('.', ','),
+    'Плановая транспортная работа (км)': res.plannedMileage ? String(res.plannedMileage.toFixed(2)).replace('.', ',') : '0,00',
+    'Направление': res.direction,
+    'Кол-во транзакций': res.transCount,
+    'Проверка КРС': res.krcStatus,
+    'Время открытия транзакции': res.openTimes,
+    'Время закрытия транзакции': res.closeTimes
+  }));
+
+  const totalMileage = results.reduce((sum, r) => sum + r.mileage, 0);
+  const totalTrans = results.reduce((sum, r) => sum + r.transCount, 0);
+  
+  if (csvData.length > 0) {
+    csvData.push({
+      'Дата': 'Итого',
+      'Маршрут': '',
+      'Время начала (Отчет)': '',
+      'ГРЗ': '',
+      'ФИО водителя': '',
+      'Статус подтверждения': '',
+      'Номер рейса': '',
+      'Фактическая транспортная работа (км)': String(totalMileage.toFixed(2)).replace('.', ','),
+      'Плановая транспортная работа (км)': '',
+      'Направление': '',
+      'Кол-во транзакций': totalTrans as any,
+      'Проверка КРС': '',
+      'Время открытия транзакции': '',
+      'Время закрытия транзакции': ''
+    });
+  }
+
+  const csv = Papa.unparse(csvData, { delimiter: ';' });
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  return blob;
+}
+
 export async function generateExcel(results: ReconciliationResult[]): Promise<Blob> {
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet('Отчет');
@@ -837,7 +1295,8 @@ export async function generateExcel(results: ReconciliationResult[]): Promise<Bl
     { header: 'ФИО водителя', key: 'conductor', width: 25 },
     { header: 'Статус подтверждения', key: 'status', width: 20 },
     { header: 'Номер рейса', key: 'tripNo', width: 15 },
-    { header: 'Фактическая транспортная работа (км)', key: 'mileage', width: 25 },
+    { header: 'Фактическая транспортная работа (км)', key: 'mileage', width: 25, style: { numFmt: '#,##0.00' } },
+    { header: 'Плановая транспортная работа (км)', key: 'plannedMileage', width: 25, style: { numFmt: '#,##0.00' } },
     { header: 'Направление', key: 'direction', width: 20 },
     { header: 'Кол-во транзакций', key: 'transCount', width: 15 },
     { header: 'Проверка КРС', key: 'krcStatus', width: 20 },
@@ -861,6 +1320,20 @@ export async function generateExcel(results: ReconciliationResult[]): Promise<Bl
 
   // Apply styling to all cells: wrap text and vertical alignment
   worksheet.eachRow((row, rowNumber) => {
+    // Determine if row needs highlighting for mismatch
+    let isMismatch = false;
+    if (rowNumber > 1) {
+      const dateVal = row.getCell(1).value;
+      if (dateVal !== 'Итого') {
+        const actual = parseFloat(row.getCell(8).value as any) || 0;
+        const planned = parseFloat(row.getCell(9).value as any) || 0;
+        // Highlight only if plan is set and doesn't match actual
+        if (planned > 0 && Math.abs(actual - planned) > 0.01) {
+          isMismatch = true;
+        }
+      }
+    }
+
     row.eachCell((cell) => {
       cell.alignment = { 
         wrapText: true, 
@@ -868,6 +1341,16 @@ export async function generateExcel(results: ReconciliationResult[]): Promise<Bl
         horizontal: rowNumber === 1 ? 'center' : 'left'
       };
       
+      // Highlight mismatching rows
+      if (isMismatch) {
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFFFC7CE' } // Light red
+        };
+        cell.font = { color: { argb: 'FF9C0006' } }; // Dark red text
+      }
+
       // Add borders for better readability
       cell.border = {
         top: { style: 'thin' },
