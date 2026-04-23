@@ -1093,31 +1093,59 @@ export async function enrichReportWithKrc(reportResults: ReconciliationResult[],
     return text.split('').map(char => map[char] || char).join('');
   };
 
+  const normalizeRouteStrict = (r: any): string => {
+    const s = normalizeRoute(r);
+    return s.replace(/[^a-zа-яё0-9]/gi, '');
+  };
+
   const conductorNamesMatch = (nameA: string, nameB: string): boolean => {
     if (!nameA || !nameB) return false;
+    
     const normalize = (n: string) => normalizeHomoglyphs(n.toLowerCase())
       .replace(/ё/g, 'е')
       .replace(/^(кондуктор|водитель|кассир|контролер)\s+/gi, '')
-      .replace(/[^a-zа-яё\s]/gi, ' ')
+      .replace(/[^a-zа-яё0-9]/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
+      
     const normA = normalize(nameA);
     const normB = normalize(nameB);
     if (!normA || !normB) return false;
     
-    // Direct match or one contains the other
-    if (normA === normB || normA.includes(normB) || normB.includes(normA)) return true;
+    if (normA === normB) return true;
     
-    const partsA = normA.split(/\s+/).filter(p => p.length >= 2);
-    const partsB = normB.split(/\s+/).filter(p => p.length >= 2);
+    const partsA = normA.split(' ').filter(p => p.length >= 2);
+    const partsB = normB.split(' ').filter(p => p.length >= 2);
     
-    // Check if the surname (usually the first part) matches exactly
-    if (partsA[0] === partsB[0]) return true;
+    if (partsA.length === 0 || partsB.length === 0) return false;
 
-    const hasSharedSignificantPart = partsA.some(pa => partsB.some(pb => pa === pb && pa.length >= 3));
-    if (hasSharedSignificantPart) return true;
+    // First part is usually surname. Surnames must match strictly.
+    const surnameA = partsA[0];
+    const surnameB = partsB[0];
+    
+    // Check if surnames match exactly
+    const surnamesMatchExact = surnameA === surnameB;
+    
+    // If surnames don't match exactly, maybe one is missing a letter at the end (declension)
+    const surnamesMatchSoft = surnameA.length > 4 && surnameB.length > 4 && 
+                             (surnameA.startsWith(surnameB.slice(0, -1)) || surnameB.startsWith(surnameA.slice(0, -1)));
+                             
+    if (!surnamesMatchExact && !surnamesMatchSoft) return false;
 
-    return false;
+    // IMPORTANT: To avoid false positives (e.g. Bokov matches Bokova Anna),
+    // we REQUIRE at least one more part to match if both sides have them.
+    const otherA = partsA.slice(1);
+    const otherB = partsB.slice(1);
+    
+    if (otherA.length > 0 && otherB.length > 0) {
+      // Check if first letters of the first name match
+      return otherA[0][0] === otherB[0][0];
+    }
+    
+    // If one has only surname and other has more, we allow it only if the surnames match exactly
+    // but this is still slightly risky. However, often reports have "Surname Name" vs just "Surname".
+    // But given the user's specific error, it's safer to require more if available.
+    return surnamesMatchExact;
   };
 
   return reportResults.map(res => {
@@ -1172,10 +1200,10 @@ export async function enrichReportWithKrc(reportResults: ReconciliationResult[],
                         k.datetime.getDate() === startDatetime.getDate();
       if (!isSameDay) return false;
 
-      // 2. Route Match - relaxed logic
-      const kRoute = normalizeRoute(k.route);
-      const isRouteMatch = (!kRoute) || 
-                          (flightRoute && (kRoute === flightRoute || flightRoute.includes(kRoute) || kRoute.includes(flightRoute)));
+      // 2. Route Match - strict equality after normalization
+      const kRoute = normalizeRouteStrict(k.route);
+      const fRoute = normalizeRouteStrict(res.route);
+      const isRouteMatch = (!kRoute) || (fRoute && kRoute === fRoute);
       if (!isRouteMatch) return false;
       
       // 3. FIO Match (Driver/Conductor Name)
