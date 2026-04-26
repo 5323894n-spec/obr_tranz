@@ -1,11 +1,13 @@
 {
-  "homepage": "https://5323894n-spec.github.io/obr_tranz/"
+  "homepage": "https://5323894n-spec.github.io/obr_tranz/",
   "name": "react-example",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d dist",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
@@ -35,6 +37,7 @@
     "vite": "^6.2.0"
   },
   "devDependencies": {
+    "gh-pages": "^6.3.0",
     "@types/express": "^4.17.21",
     "@types/multer": "^2.1.0",
     "@types/node": "^22.14.0",
